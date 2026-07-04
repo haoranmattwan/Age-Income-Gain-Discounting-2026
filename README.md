@@ -16,9 +16,8 @@ Across two parallel studies, adults aged 20 to 80 completed adjusting-amount tas
 
 ## Repository contents
 
-- [`analysis/lifespan-gain-analysis.qmd`](analysis/lifespan-gain-analysis.qmd): end-to-end Quarto analysis using the public workbook format.
+- [`analysis/Analysis.qmd`](analysis/lifespan-gain-analysis.qmd): end-to-end Quarto analysis using the public workbook format.
 - [`_quarto.yml`](_quarto.yml): project configuration that runs code from the repository root.
-- [`paper/Wan-et-al-2026.pdf`](paper/Wan-et-al-2026.pdf): published open-access article.
 - [`poster/ABAI-2023-lifespan-poster.pptx`](poster/ABAI-2023-lifespan-poster.pptx): ABAI poster source.
 - [`data/README.md`](data/README.md): data access, schema, and placement instructions.
 - [`CITATION.cff`](CITATION.cff): machine-readable citation metadata.
