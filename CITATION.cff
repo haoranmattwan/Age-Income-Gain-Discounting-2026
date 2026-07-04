@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: "If you use these materials, please cite the published article."
+title: "Reproducible materials for Age, income, and the discounting of delayed and probabilistic rewards"
+type: software
+version: 1.0.0
+date-released: 2026-07-03
+license: MIT
+authors:
+  - family-names: Wan
+    given-names: Haoran
+    affiliation: Duke Kunshan University
+  - family-names: Myerson
+    given-names: Joel
+  - family-names: Green
+    given-names: Leonard
+  - family-names: Strube
+    given-names: Michael J.
+  - family-names: Hale
+    given-names: Sandra
+preferred-citation:
+  type: article
+  title: "Age, income, and the discounting of delayed and probabilistic rewards"
+  authors:
+    - family-names: Wan
+      given-names: Haoran
+    - family-names: Myerson
+      given-names: Joel
+    - family-names: Green
+      given-names: Leonard
+    - family-names: Strube
+      given-names: Michael J.
+    - family-names: Hale
+      given-names: Sandra
+  journal: Frontiers in Psychology
+  volume: 17
+  year: 2026
+  date-published: 2026-06-12
+  doi: 10.3389/fpsyg.2026.1765142

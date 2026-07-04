@@ -1,0 +1,34 @@
+# Public-repository allowlist.
+# Everything is ignored unless explicitly included below. This preserves the
+# complete local research archive while preventing accidental disclosure.
+*
+
+!.gitignore
+!README.md
+!LICENSE.md
+!CITATION.cff
+!_quarto.yml
+
+!Analysis/
+Analysis/*
+!Analysis/Analysis.qmd
+
+!data/
+data/*
+!data/README.md
+
+!paper/
+paper/*
+!paper/Wan-et-al-2026.pdf
+
+!Poster/
+Poster/*
+!Poster/ABAI-2023-lifespan-poster.pptx
+
+# The following categories remain excluded by the allowlist:
+# original and derived data; manuscripts and private drafts; literature;
+# recruitment exports; model caches; rendered HTML/PDF; figures; logs;
+# IDE, Quarto, R Markdown, and operating-system caches.
+
+/.quarto/
+**/*.quarto_ipynb

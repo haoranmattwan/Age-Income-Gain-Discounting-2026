@@ -1,0 +1,627 @@
+---
+title: "Age, Income, and the Discounting of Delayed and Probabilistic Rewards"
+subtitle: "Reproducible analysis for Wan et al. (2026)"
+author:
+  - name: Haoran Wan
+    affiliations:
+      - name: Duke Kunshan University
+  - name: Joel Myerson
+  - name: Leonard Green
+  - name: Michael J. Strube
+  - name: Sandra Hale
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: true
+    embed-resources: true
+    df-print: paged
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+params:
+  data_file: "data/Supplementary Data.xlsx"
+  bootstrap_iterations: 5000
+  bootstrap_cores: 1
+  bootstrap_seed: 20260612
+  run_bootstrap: true
+---
+
+## Purpose and analytic scope
+
+This document reproduces the primary analyses reported in Wan et al. (2026): data validation, empirical area under the curve (AuC), descriptive associations, and multilevel beta regressions for delay and probability discounting. The data are the publication workbook distributed with the article's supplementary material, not the combined laboratory export used during development.
+
+The published analytic samples contain 596 participants in Study 1 and 592 in Study 2. The public workbook contains only retained participants, so the original attention-check and gender exclusions can be verified against the reported sample counts but cannot be recomputed from that workbook.
+
+::: {.callout-important}
+Download `Supplementary Data.xlsx` from the [article's supplementary-material section](https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2026.1765142/full#supplementary-material) and save it as `data/Supplementary Data.xlsx`. Data files are intentionally excluded from Git. See `data/README.md` for the expected sheets and variables.
+:::
+
+## Reproducibility setup
+
+The published analyses used R 4.2.1, `glmmTMB` for multilevel beta regression, and 5,000 participant-level bootstrap samples. The code below keeps those model specifications while adding explicit data assertions, deterministic random-number generation, relabeling of resampled participant clusters, portable paths, and cached bootstrap results.
+
+```{r}
+#| label: setup
+#| include: true
+
+required_packages <- c(
+  "dplyr", "tidyr", "readxl", "ggplot2", "glmmTMB", "knitr"
+)
+
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_packages) > 0L) {
+  stop(
+    "Install the required packages before rendering: ",
+    paste(missing_packages, collapse = ", "),
+    call. = FALSE
+  )
+}
+
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(ggplot2)
+library(glmmTMB)
+
+options(contrasts = c("contr.treatment", "contr.poly"))
+set.seed(params$bootstrap_seed)
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      panel.grid.minor = element_blank(),
+      plot.title.position = "plot",
+      legend.position = "bottom"
+    )
+)
+
+amount_colors <- c(
+  "$150" = "#009E73",
+  "$2,500" = "#E69F00",
+  "$30,000" = "#0072B2"
+)
+
+income_colors <- c(
+  "<$50K" = "#D55E00",
+  "$50K-$80K" = "#7B3294",
+  ">$80K" = "#0072B2"
+)
+```
+
+```{r}
+#| label: functions
+
+assert_true <- function(condition, message) {
+  if (!isTRUE(condition)) stop(message, call. = FALSE)
+}
+
+z2 <- function(x) {
+  s <- stats::sd(x, na.rm = TRUE)
+  assert_true(is.finite(s) && s > 0, "Cannot scale a constant variable.")
+  (x - mean(x, na.rm = TRUE)) / (2 * s)
+}
+
+to_z2 <- function(x, reference) {
+  (x - mean(reference, na.rm = TRUE)) / (2 * stats::sd(reference, na.rm = TRUE))
+}
+
+auc_trapezoid <- function(x, y) {
+  keep <- stats::complete.cases(x, y)
+  x <- x[keep]
+  y <- y[keep]
+  assert_true(length(x) > 1L, "AuC requires at least two observed points.")
+
+  x <- x / max(x)
+  ord <- order(x)
+  x <- c(0, x[ord])
+  y <- c(1, y[ord])
+
+  sum(diff(x) * (head(y, -1L) + tail(y, -1L)) / 2)
+}
+
+age_group <- function(age) {
+  cut(
+    age,
+    breaks = c(20, 35, 51, 65, 81),
+    right = FALSE,
+    labels = c("20-34", "35-50", "51-64", "65-80")
+  )
+}
+
+fit_beta_mixed <- function(formula, data) {
+  glmmTMB(
+    formula = formula,
+    family = beta_family(link = "logit"),
+    data = data,
+    control = glmmTMBControl(
+      optCtrl = list(iter.max = 1e5, eval.max = 1e5)
+    )
+  )
+}
+
+prepare_model_data <- function(data, complete_vars) {
+  out <- data |>
+    filter(age >= 35) |>
+    filter(if_all(all_of(complete_vars), ~ !is.na(.x))) |>
+    mutate(
+      log_amount = log(amount),
+      age_z2 = z2(age),
+      income_z2 = if ("income" %in% complete_vars) z2(income) else NA_real_,
+      amount_z2 = if ("amount" %in% complete_vars) z2(log_amount) else NA_real_,
+      education_z2 = if ("education" %in% complete_vars) z2(education) else NA_real_,
+      distress_z2 = if ("distress" %in% complete_vars) z2(distress) else NA_real_,
+      anxiety_z2 = if ("anxiety" %in% complete_vars) z2(anxiety) else NA_real_,
+      health_z2 = if ("health" %in% complete_vars) z2(health) else NA_real_,
+      gender_c = if ("gender" %in% complete_vars) gender - mean(gender) else NA_real_
+    )
+
+  assert_true(nrow(out) > 0L, "No complete observations remain for a model.")
+  out
+}
+
+cluster_resample <- function(data) {
+  sampled_ids <- sample(unique(data$id), replace = TRUE)
+
+  pieces <- lapply(seq_along(sampled_ids), function(new_id) {
+    rows <- data[data$id == sampled_ids[[new_id]], , drop = FALSE]
+    rows$id <- new_id
+    rows
+  })
+
+  bind_rows(pieces)
+}
+
+bootstrap_model <- function(model, data, iterations, seed, cores = 1L,
+                            cache_file = NULL) {
+  if (!is.null(cache_file) && file.exists(cache_file)) {
+    return(readRDS(cache_file))
+  }
+
+  coef_names <- names(fixef(model)$cond)
+  model_formula <- formula(model)
+
+  one_fit <- function(index) {
+    set.seed(seed + index)
+    boot_data <- cluster_resample(data)
+
+    fit <- suppressWarnings(
+      try(
+        fit_beta_mixed(model_formula, boot_data),
+        silent = TRUE
+      )
+    )
+
+    if (inherits(fit, "try-error") ||
+        !isTRUE(fit$sdr$pdHess) ||
+        !identical(fit$fit$convergence, 0L)) {
+      return(setNames(rep(NA_real_, length(coef_names)), coef_names))
+    }
+
+    stats::setNames(as.numeric(fixef(fit)$cond[coef_names]), coef_names)
+  }
+
+  indices <- seq_len(iterations)
+  if (.Platform$OS.type != "windows" && cores > 1L) {
+    results <- parallel::mclapply(
+      indices,
+      one_fit,
+      mc.cores = cores,
+      mc.preschedule = FALSE,
+      mc.set.seed = FALSE
+    )
+  } else {
+    results <- lapply(indices, one_fit)
+  }
+
+  draws <- as.data.frame(do.call(rbind, results), check.names = FALSE)
+
+  if (!is.null(cache_file)) {
+    dir.create(dirname(cache_file), recursive = TRUE, showWarnings = FALSE)
+    saveRDS(draws, cache_file)
+  }
+
+  draws
+}
+
+summarize_bootstrap <- function(draws) {
+  draws |>
+    pivot_longer(everything(), names_to = "term", values_to = "estimate") |>
+    filter(is.finite(estimate)) |>
+    group_by(term) |>
+    summarize(
+      median = median(estimate),
+      estimate_error = sd(estimate),
+      conf_low = quantile(estimate, 0.025),
+      conf_high = quantile(estimate, 0.975),
+      p = min(1, 2 * min(mean(estimate <= 0), mean(estimate >= 0))),
+      successful_draws = n(),
+      .groups = "drop"
+    )
+}
+
+fixed_prediction_draws <- function(model, draws, newdata) {
+  fixed_terms <- stats::delete.response(stats::terms(model))
+  design <- stats::model.matrix(fixed_terms, newdata)
+  common <- intersect(colnames(design), colnames(draws))
+  assert_true(length(common) == ncol(design), "Prediction terms do not match bootstrap terms.")
+  stats::plogis(design[, common, drop = FALSE] %*% t(as.matrix(draws[, common, drop = FALSE])))
+}
+
+prediction_interval <- function(model, draws, newdata) {
+  eta <- fixed_prediction_draws(model, draws, newdata)
+  bind_cols(
+    newdata,
+    tibble(
+      estimate = apply(eta, 1, median, na.rm = TRUE),
+      conf_low = apply(eta, 1, quantile, probs = 0.025, na.rm = TRUE),
+      conf_high = apply(eta, 1, quantile, probs = 0.975, na.rm = TRUE)
+    )
+  )
+}
+```
+
+## Data import and validation
+
+The supplementary workbook differs from the development export in four consequential ways: it contains separate study sheets; `Amount ($)` is already expressed in dollars; `Education` is already expressed in years; and Study 2 probability is stored as a percentage rather than odds against. No second recoding is required.
+
+```{r}
+#| label: import-data
+
+data_path <- params$data_file
+assert_true(file.exists(data_path), paste("Data file not found:", data_path))
+
+expected_sheets <- c(
+  "Supplementary Data",
+  "Exp1 Delay Discounting",
+  "Exp2 Probability Discounting"
+)
+assert_true(
+  all(expected_sheets %in% excel_sheets(data_path)),
+  "The workbook does not contain the expected publication sheets."
+)
+
+delay_raw <- read_excel(
+  data_path,
+  sheet = "Exp1 Delay Discounting",
+  na = c("", "NA")
+)
+probability_raw <- read_excel(
+  data_path,
+  sheet = "Exp2 Probability Discounting",
+  na = c("", "NA")
+)
+
+expected_columns <- c(
+  "id", "age", "income", "education", "gender", "anxiety",
+  "depression", "distress", "health", "ethnicity", "race",
+  "amount", "independent_variable", "rsv"
+)
+
+assert_true(ncol(delay_raw) == 14L, "Unexpected Study 1 column count.")
+assert_true(ncol(probability_raw) == 14L, "Unexpected Study 2 column count.")
+names(delay_raw) <- expected_columns
+names(probability_raw) <- expected_columns
+
+numeric_columns <- setdiff(expected_columns, character())
+delay <- delay_raw |>
+  mutate(across(all_of(numeric_columns), as.numeric)) |>
+  rename(delay_months = independent_variable) |>
+  mutate(
+    task = "Delay discounting",
+    analysis_x = delay_months,
+    age_group = age_group(age),
+    amount_label = factor(
+      paste0("$", format(amount, big.mark = ",", scientific = FALSE)),
+      levels = c("$150", "$2,500", "$30,000")
+    )
+  )
+
+probability <- probability_raw |>
+  mutate(across(all_of(numeric_columns), as.numeric)) |>
+  rename(probability_pct = independent_variable) |>
+  mutate(
+    probability = probability_pct / 100,
+    odds_against = (1 - probability) / probability,
+    task = "Probability discounting",
+    analysis_x = odds_against,
+    age_group = age_group(age),
+    amount_label = factor(
+      paste0("$", format(amount, big.mark = ",", scientific = FALSE)),
+      levels = c("$150", "$2,500", "$30,000")
+    )
+  )
+```
+
+```{r}
+#| label: validate-data
+
+assert_true(nrow(delay) == 8940L, "Study 1 should contain 8,940 rows.")
+assert_true(n_distinct(delay$id) == 596L, "Study 1 should contain 596 participants.")
+assert_true(nrow(probability) == 8880L, "Study 2 should contain 8,880 rows.")
+assert_true(n_distinct(probability$id) == 592L, "Study 2 should contain 592 participants.")
+assert_true(identical(sort(unique(delay$amount)), c(150, 2500, 30000)), "Unexpected reward amounts.")
+assert_true(identical(sort(unique(delay$delay_months)), c(1, 3, 12, 36, 120)), "Unexpected delays.")
+assert_true(identical(sort(unique(probability$probability_pct)), c(5, 20, 50, 80, 95)), "Unexpected probabilities.")
+assert_true(all(delay$rsv > 0 & delay$rsv < 1), "Study 1 RSV values must lie strictly between 0 and 1.")
+assert_true(all(probability$rsv > 0 & probability$rsv < 1), "Study 2 RSV values must lie strictly between 0 and 1.")
+
+data_audit <- tibble(
+  study = c("Study 1: delay", "Study 2: probability"),
+  rows = c(nrow(delay), nrow(probability)),
+  participants = c(n_distinct(delay$id), n_distinct(probability$id)),
+  observations_per_participant = c(
+    paste(range(as.integer(table(delay$id))), collapse = "-"),
+    paste(range(as.integer(table(probability$id))), collapse = "-")
+  )
+)
+
+knitr::kable(data_audit, caption = "Validated analytic samples")
+```
+
+## Empirical area under the curve
+
+For each participant and amount, the independent variable is normalized to the interval [0, 1], the point (0, 1) is added, and trapezoidal areas are summed. Larger AuC values indicate shallower discounting.
+
+```{r}
+#| label: calculate-auc
+
+demographic_variables <- c(
+  "age", "income", "education", "gender", "anxiety", "depression",
+  "distress", "health", "ethnicity", "race", "age_group"
+)
+
+delay_auc <- delay |>
+  group_by(id, amount) |>
+  summarize(
+    across(all_of(demographic_variables), first),
+    auc = auc_trapezoid(delay_months, rsv),
+    .groups = "drop"
+  )
+
+probability_auc <- probability |>
+  group_by(id, amount) |>
+  summarize(
+    across(all_of(demographic_variables), first),
+    auc = auc_trapezoid(odds_against, rsv),
+    .groups = "drop"
+  )
+
+assert_true(all(delay_auc$auc > 0 & delay_auc$auc < 1), "Invalid Study 1 AuC values.")
+assert_true(all(probability_auc$auc > 0 & probability_auc$auc < 1), "Invalid Study 2 AuC values.")
+```
+
+## Descriptive results
+
+```{r}
+#| label: descriptive-correlations
+
+participant_means <- function(data) {
+  data |>
+    group_by(id) |>
+    summarize(
+      age = first(age),
+      income = first(income),
+      mean_auc = mean(auc),
+      .groups = "drop"
+    )
+}
+
+delay_participant <- participant_means(delay_auc)
+probability_participant <- participant_means(probability_auc)
+
+correlation_row <- function(data, x, y, label) {
+  complete <- data[stats::complete.cases(data[c(x, y)]), , drop = FALSE]
+  test <- cor.test(complete[[x]], complete[[y]], method = "pearson")
+  tibble(
+    analysis = label,
+    n = nrow(complete),
+    r = unname(test$estimate),
+    p = test$p.value
+  )
+}
+
+correlations <- bind_rows(
+  correlation_row(delay_participant, "age", "mean_auc", "Study 1: age and mean AuC, ages 20-80"),
+  correlation_row(filter(delay_participant, age < 35), "income", "mean_auc", "Study 1: income and mean AuC, ages 20-34"),
+  correlation_row(filter(delay_participant, age >= 35), "income", "mean_auc", "Study 1: income and mean AuC, ages 35-80"),
+  correlation_row(probability_participant, "age", "mean_auc", "Study 2: age and mean AuC, ages 20-80"),
+  correlation_row(filter(probability_participant, age < 35), "income", "mean_auc", "Study 2: income and mean AuC, ages 20-34"),
+  correlation_row(filter(probability_participant, age >= 35), "income", "mean_auc", "Study 2: income and mean AuC, ages 35-80")
+) |>
+  mutate(across(c(r, p), ~ round(.x, 3)))
+
+knitr::kable(correlations, caption = "Pearson correlations reported for the primary analytic splits")
+```
+
+```{r}
+#| label: age-group-figure
+#| fig-cap: "Mean AuC by age group. Error bars are standard errors."
+#| fig-width: 9
+#| fig-height: 4.5
+
+age_group_summary <- bind_rows(
+  delay_participant |>
+    mutate(study = "Study 1: delay", age_group = age_group(age)),
+  probability_participant |>
+    mutate(study = "Study 2: probability", age_group = age_group(age))
+) |>
+  group_by(study, age_group) |>
+  summarize(
+    mean_auc = mean(mean_auc),
+    se = sd(mean_auc) / sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot(age_group_summary, aes(age_group, mean_auc, fill = age_group)) +
+  geom_col(width = 0.72, color = "grey20", show.legend = FALSE) +
+  geom_errorbar(
+    aes(ymin = mean_auc - se, ymax = mean_auc + se),
+    width = 0.16
+  ) +
+  facet_wrap(~ study, scales = "free_y") +
+  scale_fill_viridis_d(option = "C", begin = 0.15, end = 0.85) +
+  labs(x = "Age group", y = "Mean area under the curve")
+```
+
+## Multilevel beta regression
+
+All continuous predictors are centered at the grand mean and divided by two standard deviations. Gender is grand-mean centered. Models include three amount observations nested within participant. Model 4 retains the full two-way interaction specification in the final analysis scripts; the article reports the age-related subset of those terms.
+
+```{r}
+#| label: prepare-models
+
+delay_m1_data <- prepare_model_data(delay_auc, c("age"))
+delay_m2_data <- prepare_model_data(delay_auc, c("age", "income"))
+delay_m3_data <- prepare_model_data(delay_auc, c("age", "income", "distress"))
+delay_m4_data <- prepare_model_data(
+  delay_auc,
+  c("age", "income", "amount", "education", "gender", "distress", "health")
+)
+
+probability_m1_data <- prepare_model_data(probability_auc, c("age"))
+probability_m2_data <- prepare_model_data(probability_auc, c("age", "income"))
+probability_m3_data <- prepare_model_data(probability_auc, c("age", "income", "anxiety"))
+probability_m4_data <- prepare_model_data(
+  probability_auc,
+  c("age", "income", "amount", "education", "gender", "anxiety", "health")
+)
+
+delay_models <- list(
+  model_1 = fit_beta_mixed(auc ~ age_z2 + (1 | id), delay_m1_data),
+  model_2 = fit_beta_mixed(auc ~ age_z2 + income_z2 + (1 | id), delay_m2_data),
+  model_3 = fit_beta_mixed(auc ~ age_z2 + income_z2 + distress_z2 + (1 | id), delay_m3_data),
+  model_4 = fit_beta_mixed(
+    auc ~ (age_z2 + income_z2 + amount_z2 + education_z2 + gender_c + distress_z2 + health_z2)^2 +
+      (1 + amount_z2 | id),
+    delay_m4_data
+  )
+)
+
+probability_models <- list(
+  model_1 = fit_beta_mixed(auc ~ age_z2 + I(age_z2^2) + (1 | id), probability_m1_data),
+  model_2 = fit_beta_mixed(auc ~ age_z2 + I(age_z2^2) + income_z2 + (1 | id), probability_m2_data),
+  model_3 = fit_beta_mixed(auc ~ age_z2 + I(age_z2^2) + income_z2 + anxiety_z2 + (1 | id), probability_m3_data),
+  model_4 = fit_beta_mixed(
+    auc ~ (age_z2 + I(age_z2^2) + income_z2 + amount_z2 + education_z2 + gender_c + anxiety_z2 + health_z2)^2 +
+      (1 + amount_z2 | id),
+    probability_m4_data
+  )
+)
+```
+
+### Participant-level bootstrap
+
+Each bootstrap sample draws the original number of participants with replacement and retains all three amount conditions for each draw. Resampled clusters are assigned new identifiers. Results are cached under `Analysis/bootstrap_outputsp/`, which is excluded from Git.
+
+```{r}
+#| label: bootstrap-models
+
+model_data <- list(
+  delay = list(delay_m1_data, delay_m2_data, delay_m3_data, delay_m4_data),
+  probability = list(probability_m1_data, probability_m2_data, probability_m3_data, probability_m4_data)
+)
+
+run_model_bootstraps <- function(models, datasets, prefix) {
+  if (!isTRUE(params$run_bootstrap)) return(vector("list", length(models)))
+
+  Map(
+    function(model, data, model_name, model_index) {
+      bootstrap_model(
+        model = model,
+        data = data,
+        iterations = params$bootstrap_iterations,
+        seed = params$bootstrap_seed + model_index * 100000L,
+        cores = as.integer(params$bootstrap_cores),
+        cache_file = file.path(
+          "Analysis", "bootstrap_outputs",
+          sprintf("%s-%s-b%05d.rds", prefix, model_name, params$bootstrap_iterations)
+        )
+      )
+    },
+    models,
+    datasets,
+    names(models),
+    seq_along(models)
+  )
+}
+
+delay_boot <- run_model_bootstraps(delay_models, model_data$delay, "delay")
+probability_boot <- run_model_bootstraps(probability_models, model_data$probability, "probability")
+```
+
+```{r}
+#| label: model-tables
+#| results: asis
+
+reported_delay_terms <- c(
+  "age_z2", "income_z2", "distress_z2", "amount_z2", "education_z2",
+  "gender_c", "health_z2", "age_z2:income_z2", "age_z2:distress_z2",
+  "age_z2:amount_z2", "age_z2:education_z2", "age_z2:gender_c",
+  "age_z2:health_z2"
+)
+
+reported_probability_terms <- c(
+  "age_z2", "I(age_z2^2)", "income_z2", "anxiety_z2", "amount_z2",
+  "education_z2", "gender_c", "health_z2", "age_z2:income_z2",
+  "age_z2:anxiety_z2", "age_z2:amount_z2", "age_z2:education_z2",
+  "age_z2:gender_c", "age_z2:health_z2", "I(age_z2^2):income_z2",
+  "I(age_z2^2):anxiety_z2", "I(age_z2^2):amount_z2",
+  "I(age_z2^2):education_z2", "I(age_z2^2):gender_c",
+  "I(age_z2^2):health_z2"
+)
+
+combine_model_summaries <- function(draw_list, terms) {
+  bind_rows(lapply(seq_along(draw_list), function(i) {
+    if (is.null(draw_list[[i]])) return(tibble())
+    summarize_bootstrap(draw_list[[i]]) |>
+      mutate(model = paste("Model", i))
+  })) |>
+    filter(term %in% terms) |>
+    mutate(
+      estimate = sprintf("%.3f (%.3f)", median, estimate_error),
+      p = ifelse(p < 0.001, "<.001", sprintf("%.3f", p))
+    ) |>
+    select(model, term, estimate, p, successful_draws)
+}
+
+if (isTRUE(params$run_bootstrap)) {
+  delay_table <- combine_model_summaries(delay_boot, reported_delay_terms)
+  probability_table <- combine_model_summaries(probability_boot, reported_probability_terms)
+
+  cat(knitr::kable(
+    delay_table,
+    format = "html",
+    caption = "Study 1 bootstrap estimates: median (bootstrap SD)"
+  ))
+  cat("\n\n")
+  cat(knitr::kable(
+    probability_table,
+    format = "html",
+    caption = "Study 2 bootstrap estimates: median (bootstrap SD)"
+  ))
+}
+```
+
+## Sensitivity checks and diagnostics
+
+The final scripts also fit Study 1 models substituting anxiety, depression, or both for total distress. Study 2 compared distress, depression, and anxiety and retained anxiety in the reported Model 3. Those substitutions can be implemented by replacing the corresponding standardized predictor in Model 3.
+
+For a full replication, inspect simulation-based residual diagnostics with `DHARMa::simulateResiduals()` for each fitted model. Because the publication identified departures from the assumed beta distribution, inferential claims should be based on the participant-level bootstrap summaries rather than asymptotic model standard errors.
+
+```{r}
+#| label: session-information
+
+sessionInfo()
+```
+
+## Reference
+
+Wan, H., Myerson, J., Green, L., Strube, M. J., & Hale, S. (2026). Age, income, and the discounting of delayed and probabilistic rewards. *Frontiers in Psychology, 17*, 1765142. <https://doi.org/10.3389/fpsyg.2026.1765142>
