@@ -37,8 +37,6 @@ The workbook differs from the combined raw export used during development:
 - Study 2 probability is recorded as a percentage (`5`, `20`, `50`, `80`, `95`); the analysis converts it to odds against.
 - Attention-check variables are not included because the workbook contains the final analytic samples.
 
-Do not use the archived derivative `Data_Delay.csv` or `Data_Prob.csv` files. Their export code applied amount and education recoding after those variables had already been transformed, producing invalid columns. The Quarto analysis reads the article's supplementary workbook directly.
-
 ## Reproduce the analysis
 
 1. Install R and Quarto.
